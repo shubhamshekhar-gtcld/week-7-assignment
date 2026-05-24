@@ -66,15 +66,18 @@ def aws_call(action: str, func: Callable[..., Any], *args: Any, **kwargs: Any) -
 
 
 def ignored_client_error(error: ClientError) -> bool:
+    """Return whether a missing resource error is safe to ignore during cleanup."""
     code = error.response.get("Error", {}).get("Code", "")
     return code in NOT_FOUND_CODES
 
 
 def save_state(state: dict[str, Any]) -> None:
+    """Persist identifiers for resources created during the current run."""
     Path(STATE_FILE).write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
 def load_state() -> dict[str, Any]:
+    """Load saved resource identifiers, returning an empty mapping if absent."""
     path = Path(STATE_FILE)
     if not path.exists():
         return {}
@@ -82,6 +85,7 @@ def load_state() -> dict[str, Any]:
 
 
 def remove_state_file() -> None:
+    """Remove temporary recovery state after resources have been cleaned up."""
     path = Path(STATE_FILE)
     if path.exists():
         try:
@@ -91,6 +95,7 @@ def remove_state_file() -> None:
 
 
 def make_clients(region: str = REGION) -> dict[str, Any]:
+    """Create AWS clients and an EC2 resource interface for one region."""
     session = boto3.Session(region_name=region)
     return {
         "ec2": session.client("ec2", config=BOTO_CONFIG),
@@ -102,6 +107,7 @@ def make_clients(region: str = REGION) -> dict[str, Any]:
 
 
 def tag_specifications(run_id: str, resource_types: list[str]) -> list[dict[str, Any]]:
+    """Build launch-time tag specifications for EC2-created resources."""
     tags = [
         {"Key": PROJECT_TAG_KEY, "Value": PROJECT_TAG_VALUE},
         {"Key": RUN_ID_TAG_KEY, "Value": run_id},
@@ -110,6 +116,7 @@ def tag_specifications(run_id: str, resource_types: list[str]) -> list[dict[str,
 
 
 def create_tags(ec2: Any, resource_ids: list[str], run_id: str) -> None:
+    """Tag existing EC2 network resources for later discovery and cleanup."""
     tags = [
         {"Key": PROJECT_TAG_KEY, "Value": PROJECT_TAG_VALUE},
         {"Key": RUN_ID_TAG_KEY, "Value": run_id},
@@ -118,6 +125,7 @@ def create_tags(ec2: Any, resource_ids: list[str], run_id: str) -> None:
 
 
 def get_current_ip() -> str:
+    """Discover the caller's public IP and format it as a single-host CIDR."""
     print("Detecting current public IP for SSH rule...")
     response = requests.get("https://api.ipify.org", timeout=10)
     response.raise_for_status()
@@ -125,6 +133,7 @@ def get_current_ip() -> str:
 
 
 def resolve_ami_id(clients: dict[str, Any]) -> str:
+    """Return the configured or latest suitable Amazon Linux 2 AMI ID."""
     if AMI_ID:
         return AMI_ID
     print(f"Resolving AMI ID from SSM parameter: {AMI_SSM_PARAMETER}")
@@ -160,6 +169,7 @@ def resolve_ami_id(clients: dict[str, Any]) -> str:
 
 
 def create_vpc(clients: dict[str, Any], state: dict[str, Any]) -> None:
+    """Create and record a VPC with one internet-routable public subnet."""
     ec2 = clients["ec2"]
     ec2_resource = clients["ec2_resource"]
     run_id = state["run_id"]
@@ -220,6 +230,7 @@ def create_vpc(clients: dict[str, Any], state: dict[str, Any]) -> None:
 
 
 def create_security_group(clients: dict[str, Any], state: dict[str, Any]) -> None:
+    """Create a security group allowing SSH access only from the current IP."""
     ec2_resource = clients["ec2_resource"]
     run_id = state["run_id"]
     ssh_cidr = get_current_ip()
@@ -251,6 +262,7 @@ def create_security_group(clients: dict[str, Any], state: dict[str, Any]) -> Non
 
 
 def launch_instance(clients: dict[str, Any], state: dict[str, Any]) -> tuple[str, str]:
+    """Launch the EC2 instance, wait for it to run, and return its identity."""
     ec2 = clients["ec2"]
     ec2_resource = clients["ec2_resource"]
     run_id = state["run_id"]
@@ -299,6 +311,7 @@ def launch_instance(clients: dict[str, Any], state: dict[str, Any]) -> tuple[str
 
 
 def create_bucket(clients: dict[str, Any], state: dict[str, Any]) -> str:
+    """Create and tag a globally unique S3 bucket for the current run."""
     s3 = clients["s3"]
     account_id = aws_call("Reading AWS account ID", clients["sts"].get_caller_identity)["Account"]
     account_suffix = account_id[-6:]
@@ -336,6 +349,7 @@ def create_bucket(clients: dict[str, Any], state: dict[str, Any]) -> str:
 
 
 def ensure_upload_file() -> Path:
+    """Return the sample input file, creating its harmless content if missing."""
     path = Path(UPLOAD_FILE)
     if not path.exists():
         path.write_text(
@@ -346,6 +360,7 @@ def ensure_upload_file() -> Path:
 
 
 def upload_and_list_objects(clients: dict[str, Any], state: dict[str, Any]) -> None:
+    """Upload the demonstration file and print objects found in its S3 bucket."""
     s3 = clients["s3"]
     bucket_name = state["bucket_name"]
     upload_path = ensure_upload_file()
@@ -370,6 +385,7 @@ def upload_and_list_objects(clients: dict[str, Any], state: dict[str, Any]) -> N
 
 
 def delete_bucket_objects(s3: Any, bucket_name: str) -> None:
+    """Empty an S3 bucket, including any object versions and delete markers."""
     print(f"Deleting all objects from bucket: {bucket_name}")
 
     version_paginator = aws_call("Creating S3 version paginator", s3.get_paginator, "list_object_versions")
@@ -404,6 +420,7 @@ def delete_bucket_objects(s3: Any, bucket_name: str) -> None:
 
 
 def retry_dependency(action: str, func: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    """Retry deletions briefly while AWS releases dependent network resources."""
     delay = 2
     for attempt in range(1, 8):
         try:
@@ -421,6 +438,7 @@ def retry_dependency(action: str, func: Callable[..., Any], *args: Any, **kwargs
 
 
 def terminate_instance(clients: dict[str, Any], state: dict[str, Any]) -> None:
+    """Terminate a created EC2 instance and wait until AWS confirms termination."""
     instance_id = state.get("instance_id")
     if not instance_id:
         return
@@ -454,6 +472,7 @@ def terminate_instance(clients: dict[str, Any], state: dict[str, Any]) -> None:
 
 
 def cleanup_bucket(clients: dict[str, Any], state: dict[str, Any]) -> None:
+    """Delete the run's S3 objects and bucket when a bucket was created."""
     bucket_name = state.get("bucket_name")
     if not bucket_name:
         return
@@ -469,6 +488,7 @@ def cleanup_bucket(clients: dict[str, Any], state: dict[str, Any]) -> None:
 
 
 def cleanup_network(clients: dict[str, Any], state: dict[str, Any]) -> None:
+    """Remove created VPC dependencies in an order accepted by AWS."""
     ec2 = clients["ec2"]
     ec2_resource = clients["ec2_resource"]
 
@@ -539,6 +559,7 @@ def cleanup_network(clients: dict[str, Any], state: dict[str, Any]) -> None:
 
 
 def find_tagged_resources(clients: dict[str, Any], run_id: str | None = None) -> dict[str, Any]:
+    """Find assignment-owned resources by project tags for recovery cleanup."""
     ec2 = clients["ec2"]
     s3 = clients["s3"]
     filters = [{"Name": f"tag:{PROJECT_TAG_KEY}", "Values": [PROJECT_TAG_VALUE]}]
@@ -595,6 +616,7 @@ def find_tagged_resources(clients: dict[str, Any], run_id: str | None = None) ->
 
 
 def cleanup_resources(clients: dict[str, Any], state: dict[str, Any], remove_state: bool = False) -> None:
+    """Attempt all cleanup stages using saved state plus tagged discovery."""
     if not state:
         state = find_tagged_resources(clients)
     else:
@@ -620,6 +642,7 @@ def cleanup_resources(clients: dict[str, Any], state: dict[str, Any], remove_sta
 
 
 def run_lifecycle() -> None:
+    """Run the full AWS provision, demonstration, and guaranteed cleanup flow."""
     state = {
         "run_id": uuid.uuid4().hex,
         "region": REGION,
@@ -641,6 +664,7 @@ def run_lifecycle() -> None:
 
 
 def main() -> int:
+    """Execute the lifecycle command and return a terminal-friendly status code."""
     try:
         run_lifecycle()
         return 0
